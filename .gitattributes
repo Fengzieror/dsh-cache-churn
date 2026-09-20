@@ -1,0 +1,8 @@
+# Normalize to LF in the repository regardless of the committing platform, so
+# the published package is byte-identical everywhere. YAML and JS here are
+# consumed by Node and the DSH loader on all three platforms.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary

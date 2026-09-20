@@ -1,0 +1,29 @@
+# @fengzieror/dsh-cache-churn — the profile layer this bundle contributes.
+#
+# One row, inserted over whatever the earlier bundle layers built. Later layers
+# (the profile's own cordis.patch.yml, then any --patch overlay) address this
+# row by `id: cache-churn` and replace its whole `config`, so every key the row
+# needs is restated there rather than inherited.
+#
+# The row ships DISABLED. This package exists to discard provider prompt cache
+# on purpose, so installing it must not start costing money by itself: opt in
+# from a later layer, and narrow `workspace` to the one directory you are
+# experimenting in. `enabled: false` also keeps the composition byte-identical
+# to a deployment without this bundle.
+#
+# `workspace` is the session cwd the marker is confined to. An empty value
+# means every session in the process, which is rarely what you want. Paths use
+# forward slashes: node:path resolves them on every platform, and the value is
+# compared case-insensitively on Windows.
+
+- insert:
+    - id: cache-churn
+      name: '@fengzieror/dsh-cache-churn'
+      config:
+        enabled: false
+        channel: section
+        position: head
+        workspace: ''
+        periodMs: 10000
+        label: cache-churn
+        forceNewSeries: false

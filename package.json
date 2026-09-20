@@ -1,0 +1,37 @@
+{
+  "name": "@fengzieror/dsh-cache-churn",
+  "version": "0.1.0",
+  "description": "DSH bundle that rotates a system-prompt marker on a timer for one workspace, deliberately defeating prompt-prefix cache reuse.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "test.mjs",
+    "test-integration.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test.mjs",
+    "test:integration": "node test-integration.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "deepseek-harness",
+    "cordis",
+    "prompt-cache"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
