@@ -3,6 +3,7 @@
  * Run with `node test.mjs`. No test framework, no dependencies.
  */
 import { apply, name, inject } from './index.js'
+import { join, sep } from 'node:path'
 
 const ORDERS = {
 	HARNESS_IDENTITY: -1000,
@@ -38,7 +39,17 @@ function mockCtx() {
 /** Assemble context for a session at one cwd. */
 const ctxAt = (cwd) => ({ agent: { session: { header: { cwd } } } })
 
-const WORKSPACE = 'D:\\Projects\\_agent-ops\\badCacheRate'
+/**
+ * The workspace under test. Derived from the process cwd so the test is
+ * platform-neutral: any absolute path exercises the same gating logic.
+ */
+const WORKSPACE = process.cwd()
+
+/** A sibling directory that can never equal WORKSPACE on any platform. */
+const OUTSIDE = join(WORKSPACE, '..', 'definitely-not-the-workspace')
+
+/** Windows path comparison is case-insensitive and separator-agnostic. */
+const IS_WINDOWS = process.platform === 'win32'
 
 console.log('--- module shape ---')
 check('name', name, 'cache-churn')
@@ -60,11 +71,13 @@ console.log('\n--- workspace gate ---')
 	apply(ctx, { workspace: WORKSPACE, periodMs: 0 })
 	const text = ctx.record.sections[0].text
 	check('matching cwd renders', text(ctxAt(WORKSPACE)).startsWith('Cache churn marker'), true)
-	check('non-matching cwd is empty', text(ctxAt('D:\\Projects\\other')), '')
+	check('non-matching cwd is empty', text(ctxAt(OUTSIDE)), '')
 	check('missing cwd is empty', text({}), '')
 	check('missing agent is empty', text({ agent: undefined }), '')
-	check('trailing separator tolerated', text(ctxAt(WORKSPACE + '\\')).startsWith('Cache churn marker'), true)
-	check('case-insensitive on win32', text(ctxAt(WORKSPACE.toUpperCase())).startsWith('Cache churn marker'), true)
+	// A trailing separator is normalized away by resolve() on every platform.
+	check('trailing separator tolerated', text(ctxAt(WORKSPACE + sep)).startsWith('Cache churn marker'), true)
+	// Case folding is a Windows-only behavior; POSIX paths are case-sensitive.
+	check('case handling matches the platform', text(ctxAt(WORKSPACE.toUpperCase())).startsWith('Cache churn marker'), IS_WINDOWS)
 }
 
 console.log('\n--- no workspace means every session ---')
@@ -72,7 +85,7 @@ console.log('\n--- no workspace means every session ---')
 	const ctx = mockCtx()
 	apply(ctx, { periodMs: 0 })
 	const text = ctx.record.sections[0].text
-	check('other cwd renders too', text(ctxAt('C:\\anywhere')).startsWith('Cache churn marker'), true)
+	check('other cwd renders too', text(ctxAt(OUTSIDE)).startsWith('Cache churn marker'), true)
 }
 
 console.log('\n--- rotation ---')
@@ -131,7 +144,7 @@ console.log('\n--- forceNewSeries ---')
 	const next = async () => ({ kind: 'enter', messages: [] })
 	const inside = await fn({ agent: { session: { header: { cwd: WORKSPACE } } } }, next)
 	check('matching session starts a series', inside.startsRequestSeries, true)
-	const outside = await fn({ agent: { session: { header: { cwd: 'D:\\elsewhere' } } } }, next)
+	const outside = await fn({ agent: { session: { header: { cwd: OUTSIDE } } } }, next)
 	check('non-matching session untouched', outside.startsRequestSeries, undefined)
 	const rejected = await fn({ agent: { session: { header: { cwd: WORKSPACE } } } }, async () => ({ kind: 'reject' }))
 	check('reject passes through', rejected.kind, 'reject')
