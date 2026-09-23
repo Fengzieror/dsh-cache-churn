@@ -56,6 +56,7 @@ The bundle's `cordis.patch.yml` inserts one row, **disabled**. Installing this p
     position: head
     workspace: 'D:/Projects/_agent-ops/badCacheRate'
     periodMs: 10000
+    probability: 0.5
     style: neutral
     field: trace_id
     label: badCacheRate
@@ -68,11 +69,31 @@ The bundle's `cordis.patch.yml` inserts one row, **disabled**. Installing this p
 | `channel` | `'section'` | `'section'` rotates the system prompt; `'context'` rotates the dynamic runtime-context snapshot |
 | `position` | `'head'` | `'head'` puts the marker before every other prompt section; `'tail'` puts it last |
 | `workspace` | `''` | Session cwd the marker is confined to; empty means every session |
-| `periodMs` | `10000` | Rotation period. `0` mints a new value on every assembly |
+| `periodMs` | `10000` | How often a rotation may happen. `0` or `-1` means "on every assembly" |
+| `probability` | `1` | Chance that an open gate actually rotates. `1` always does, `0` never does |
 | `style` | `'neutral'` | `'neutral'` renders an opaque field; `'legacy'` renders the self-describing marker line |
 | `field` | `'trace_id'` | Field name used by the `neutral` style |
 | `label` | `'cache-churn'` | Marker label used by the `legacy` style, so two instances are distinguishable |
 | `forceNewSeries` | `false` | Start a new request series every step, forcing the aggressive path on `in-history` routes |
+
+### Time and probability
+
+`periodMs` and `probability` are two gates in series. **Time decides when a roll happens; probability decides whether that roll breaks the cache.**
+
+| `periodMs` | `probability` | Behavior |
+|---|---|---|
+| `0` or `-1` | `1` | Every assembly rotates — the original deterministic instrument |
+| `0` or `-1` | `p` | Every assembly rolls; a fraction `p` of them rotate |
+| `> 0` | `1` | One rotation per period, as before |
+| `> 0` | `p` | One roll per period; a fraction `p` of periods rotate |
+
+A roll that loses **does not change the prompt at all**. That is the point of the field: the value, and therefore the provider's cached prefix, survives. A lost roll also re-arms the clock, so the expected number of assemblies between two cache breaks is `periodMs / probability` rather than "every assembly once the period has elapsed".
+
+The first assembly always mints a value, because there is no previous value to keep. Probability governs *changes*, not initialization — so `probability: 0` is a useful control case (one stable line, from the first request onward) rather than an empty marker.
+
+`probability: 0` is worth understanding as a config in its own right: the plugin is active, the marker is rendered, and the prompt is byte-identical across every assembly. It is the cleanest available proof that an observed cache miss is *not* caused by this plugin.
+
+> **Note on `periodMs: -1`.** `0` is the documented "no period" value. `-1` is accepted as an explicit alias because a config author reaching for `-1` means the same thing, and a rejected boot is a worse outcome than a documented alias. Every other negative value is rejected.
 
 ### Marker styles
 
@@ -150,12 +171,14 @@ Fixed and small: one line per request, replacing the previous one. On the `conte
 
 #### KV Cache effect
 
-Replacing. On a route without `systemPromptUpdate: 'in-history'`, every rotation rewrites the leading `system/message` node, so reuse is lost from the first token of the request. On an `in-history` route without `forceNewSeries`, the change is appended after the cached history and earlier reusable tokens stay intact. On the `context` channel the change is append-only and never invalidates an already-reusable prefix.
+Replacing, but only when a roll is won. On a route without `systemPromptUpdate: 'in-history'`, a rotation rewrites the leading `system/message` node, so reuse is lost from the first token of the request. A lost roll leaves the node byte-identical, so the cached prefix survives untouched — which is what makes `probability` a cache-cost dial rather than just a content dial. On an `in-history` route without `forceNewSeries`, the change is appended after the cached history and earlier reusable tokens stay intact. On the `context` channel the change is append-only and never invalidates an already-reusable prefix.
 
 ## Known Limitations and Deferred Work
 
-- **This package exists to waste money and latency** — every rotation discards a provider cache that would otherwise have been reused. Confine `workspace` before enabling it, and disable the row when the experiment ends.
+- **This package exists to waste money and latency** — every won roll discards a provider cache that would otherwise have been reused. Confine `workspace` before enabling it, and disable the row when the experiment ends.
 - **`neutral` is camouflage, not concealment** — the line still reaches the model and still appears in your own logs and in the rendered prompt. It hides *intent*, not *presence*: a reader who correlates the prompt across two requests still sees the field change. What it removes is the free hint that the change is deliberate.
+- **`probability` is sampled per assembly, not per unit of time** — the roll happens when an assembly asks for a value, so a session that assembles more often rolls more often. The rate is per-assembly (or per-period-of-assemblies), not per wall-clock second. An idle session rolls nothing.
 - **Rotation is assembly-driven, not wall-clock-driven** — the token advances only when an assembly asks for it, so an idle session mints nothing and a session resuming after a long pause mints exactly one new value rather than catching up.
-- **`forceNewSeries` is coarser than it needs to be** — it starts a new series on every step of a matching session rather than only on rotation, because a pre-step listener cannot observe which assembly value a later prompt commit will render.
+- **`Math.random` is not a cryptographic source** — adequate for sampling cache breaks, and deliberately not `randomBytes`, which is reserved for the nonce value itself. Do not reuse this path where unpredictability is a security property.
+- **`forceNewSeries` is coarser than it needs to be** — it starts a new series on every step of a matching session rather than only on rotation, because a pre-step listener cannot observe which assembly value a later prompt commit will render. Note that it is independent of `probability`: it forces a new series on every step of a matching session, including steps where the roll was lost.
 - **No `systemPromptUpdate` introspection** — the plugin cannot read the prepared route's mode, so `forceNewSeries` is an operator decision rather than a derived one.

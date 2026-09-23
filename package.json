@@ -1,7 +1,7 @@
 {
   "name": "@fengzieror/dsh-cache-churn",
-  "version": "0.2.0",
-  "description": "DSH bundle that rotates a system-prompt marker on a timer for one workspace, deliberately defeating prompt-prefix cache reuse.",
+  "version": "0.3.0",
+  "description": "DSH bundle that rotates a system-prompt marker on a timer and probability, deliberately defeating prompt-prefix cache reuse.",
   "type": "module",
   "main": "index.js",
   "exports": {

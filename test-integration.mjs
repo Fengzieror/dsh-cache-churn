@@ -130,6 +130,56 @@ console.log('\n--- neutral nonce is unpredictable across assemblies ---')
 	await pluginFiber.dispose()
 }
 
+console.log('\n--- probability 0 keeps the prompt byte-identical ---')
+{
+	// The assertion that matters for caching: with the roll always lost, the
+	// rendered prompt must not change at all, so the provider prefix stays
+	// reusable. A marker that merely changed less often would still miss.
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, probability: 0 })
+	const first = await render(promptCtx, WORKSPACE)
+	const second = await render(promptCtx, WORKSPACE)
+	const third = await render(promptCtx, WORKSPACE)
+
+	check('a marker is still rendered', NEUTRAL_RE.test(first.split('\n')[0]), true)
+	check('prompt is byte-identical across assemblies', first === second && second === third, true)
+
+	// And it must equal what a disabled row renders, apart from the one stable
+	// marker line — i.e. nothing else in the prompt is perturbed. The marker is
+	// inserted as the leading section, so the unmarked prompt is a suffix.
+	const disabled = await withSystemPrompt({ enabled: false, workspace: WORKSPACE })
+	const baseline = await render(disabled.promptCtx, WORKSPACE)
+	await disabled.pluginFiber.dispose()
+	const markerLine = first.split('\n')[0]
+	// `renderPrompt` joins sections with a blank line, so the unmarked prompt
+	// follows the marker line after the separator.
+	check('marker is the only added content', first.slice(markerLine.length).trimStart(), baseline)
+
+	await pluginFiber.dispose()
+}
+
+console.log('\n--- probability 1 still rotates every assembly ---')
+{
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, probability: 1 })
+	const first = await render(promptCtx, WORKSPACE)
+	const second = await render(promptCtx, WORKSPACE)
+	check('prompt changes', first !== second, true)
+	check('first line differs', first.split('\n')[0] !== second.split('\n')[0], true)
+	await pluginFiber.dispose()
+}
+
+console.log('\n--- a real period holds the prompt between rolls ---')
+{
+	// periodMs large enough that no wall-clock time passes during the test, so
+	// the gate stays closed and the prompt must be stable regardless of the
+	// roll — this is the "time exists, so only roll when it elapses" case.
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 3_600_000, probability: 1 })
+	const first = await render(promptCtx, WORKSPACE)
+	const second = await render(promptCtx, WORKSPACE)
+	check('prompt stable while the period is open', first === second, true)
+	check('marker still present', NEUTRAL_RE.test(first.split('\n')[0]), true)
+	await pluginFiber.dispose()
+}
+
 console.log('\n--- legacy style restores the self-describing line ---')
 {
 	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, style: 'legacy' })

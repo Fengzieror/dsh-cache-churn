@@ -21,6 +21,14 @@
 # `Cache churn marker (<label>): <epoch-ms>-<index>` line. The neutral default
 # exists so the rotating value does not announce that the rotation is
 # deliberate; see the README's "Marker styles".
+#
+# `periodMs` and `probability` are two gates in series: time decides WHEN a
+# roll happens, probability decides WHETHER that roll breaks the cache. A lost
+# roll leaves the prompt byte-identical, so the provider prefix survives.
+#   periodMs 0 or -1  -> roll on every assembly
+#   periodMs > 0      -> roll once the period has elapsed
+# `probability: 1` always rotates (the original behavior); `0` never does,
+# which is a useful control case. See the README's "Time and probability".
 
 - insert:
     - id: cache-churn
@@ -31,6 +39,7 @@
         position: head
         workspace: ''
         periodMs: 10000
+        probability: 1
         style: neutral
         field: trace_id
         label: cache-churn

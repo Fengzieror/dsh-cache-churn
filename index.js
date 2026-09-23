@@ -23,6 +23,14 @@
  * log and the prompt to agree, and useless as a probe because it tells anyone
  * reading the prompt that they are looking at an instrument.
  *
+ * Rotation is gated twice. `periodMs` decides *when* a roll happens: `0` or
+ * `-1` rolls on every assembly, a positive value rolls once the period has
+ * elapsed. `probability` then decides *whether* that roll breaks the cache. A
+ * lost roll leaves the rendered value untouched, so the prompt stays
+ * byte-identical and the provider prefix survives — which makes `probability`
+ * a cache-cost dial rather than merely a content dial. `probability: 1` is the
+ * original always-rotate behavior; `0` renders one stable line forever.
+ *
  * This package is an experiment instrument. It intentionally burns provider
  * prompt cache. Narrow it with `workspace`.
  *
@@ -46,6 +54,16 @@ const CONTEXT_NAME = 'cache-churn:marker'
 /** Fallback rotation period when the config omits `periodMs`. */
 const DEFAULT_PERIOD_MS = 10_000
 
+/**
+ * Fallback per-roll success chance when the config omits `probability`.
+ *
+ * `1` reproduces the pre-probability behavior exactly: every open gate rotates.
+ * Lowering it turns rotation into a sampled event, which is the point — a
+ * deterministic instrument can be characterized by an observer, a sampled one
+ * cannot.
+ */
+const DEFAULT_PROBABILITY = 1
+
 /** Fallback marker label when the config omits `label`. */
 const DEFAULT_LABEL = 'cache-churn'
 
@@ -66,6 +84,14 @@ const POSITIONS = new Set(['head', 'tail'])
 
 /** Accepted `style` values. */
 const STYLES = new Set(['neutral', 'legacy'])
+
+/**
+ * `periodMs` values that mean "roll on every assembly" rather than "roll on a
+ * clock". `0` is the documented form; `-1` is accepted as an explicit
+ * "no period" sentinel, because a config author reaching for `-1` means the
+ * same thing and a rejected boot is a worse outcome than a documented alias.
+ */
+const IMMEDIATE_PERIODS = new Set([0, -1])
 
 /** Nonce length in bytes; 8 bytes is 16 hex characters. */
 const NONCE_BYTES = 8
@@ -99,7 +125,14 @@ function normalizePath(value) {
  */
 function resolveConfig(config = {}) {
 	const periodMs = config.periodMs ?? DEFAULT_PERIOD_MS
-	if (!Number.isSafeInteger(periodMs) || periodMs < 0) throw new TypeError(`cache-churn: periodMs must be a non-negative safe integer, got ${String(periodMs)}`)
+	// `-1` is the "no period" sentinel; every other negative value is a typo.
+	if (!Number.isSafeInteger(periodMs) || (periodMs < 0 && periodMs !== -1)) {
+		throw new TypeError(`cache-churn: periodMs must be a non-negative safe integer, or -1 for "no period", got ${String(periodMs)}`)
+	}
+	const probability = config.probability ?? DEFAULT_PROBABILITY
+	if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+		throw new TypeError(`cache-churn: probability must be a number in [0, 1], got ${String(probability)}`)
+	}
 	const channel = config.channel ?? 'section'
 	if (!CHANNELS.has(channel)) throw new TypeError(`cache-churn: channel must be "section" or "context", got ${JSON.stringify(channel)}`)
 	const workspace = config.workspace ?? ''
@@ -117,6 +150,7 @@ function resolveConfig(config = {}) {
 		channel,
 		workspace: workspace.trim().length === 0 ? undefined : normalizePath(workspace),
 		periodMs,
+		probability,
 		label,
 		position,
 		style,
@@ -200,18 +234,55 @@ export function apply(ctx, config) {
 		: randomBytes(NONCE_BYTES).toString('hex')
 
 	/**
-	 * Advance the rotation value when the period has elapsed, then return the
-	 * current one. Called from inside the prompt provider, so the value only
-	 * advances when an assembly actually asks for it — an idle session mints
-	 * nothing.
+	 * Advance the rotation value, returning whatever value this assembly should
+	 * render. Called from inside the prompt provider, so the value only moves
+	 * when an assembly actually asks for it — an idle session rolls nothing.
+	 *
+	 * Two gates, applied in order:
+	 *
+	 * 1. **Time.** With `periodMs` in `IMMEDIATE_PERIODS` the gate is always
+	 *    open, so every assembly rolls. With a real period the gate opens only
+	 *    once `periodMs` has elapsed since the last roll.
+	 * 2. **Probability.** An open gate still has to be won. A lost roll leaves
+	 *    the rendered value untouched, which is the whole point: the prompt
+	 *    stays byte-identical and the provider cache survives. Only a won roll
+	 *    mints a new value and breaks the prefix.
+	 *
+	 * The first assembly always mints, because there is no previous value to
+	 * keep. That makes `probability: 0` a true control case — one stable line
+	 * from the first request onward — rather than an empty marker.
+	 *
+	 * A lost roll re-arms the clock rather than retrying immediately, so the
+	 * expected number of assemblies between breaks is `periodMs / probability`
+	 * instead of "every assembly once the period has passed".
+	 *
 	 * @returns the rotation value for this assembly.
 	 */
 	const currentToken = () => {
 		const now = Date.now()
-		if (token.length === 0 || resolved.periodMs === 0 || now - mintedAt >= resolved.periodMs) {
+
+		// Establish the baseline. Probability governs changes, not
+		// initialization, so a `probability: 0` config still renders a value.
+		if (token.length === 0) {
 			mintedAt = now
 			mintIndex += 1
 			token = mintToken()
+			return token
+		}
+
+		// Gate 1: time. A closed gate is a no-op — not even a roll is spent.
+		if (!IMMEDIATE_PERIODS.has(resolved.periodMs) && now - mintedAt < resolved.periodMs) return token
+
+		// Gate 2: probability. `Math.random()` is `[0, 1)`, so `1` always wins
+		// and `0` never does, with no special-casing.
+		if (Math.random() < resolved.probability) {
+			mintedAt = now
+			mintIndex += 1
+			token = mintToken()
+		} else {
+			// Keep the old value so the prompt — and its cached prefix —
+			// survives, but start the next period from now.
+			mintedAt = now
 		}
 		return token
 	}
