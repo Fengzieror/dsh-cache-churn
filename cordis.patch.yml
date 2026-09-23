@@ -15,6 +15,12 @@
 # means every session in the process, which is rarely what you want. Paths use
 # forward slashes: node:path resolves them on every platform, and the value is
 # compared case-insensitively on Windows.
+#
+# `style: neutral` renders `<field>: <random hex>`, which reads like an ordinary
+# runtime field. `style: legacy` renders the self-describing
+# `Cache churn marker (<label>): <epoch-ms>-<index>` line. The neutral default
+# exists so the rotating value does not announce that the rotation is
+# deliberate; see the README's "Marker styles".
 
 - insert:
     - id: cache-churn
@@ -25,5 +31,7 @@
         position: head
         workspace: ''
         periodMs: 10000
+        style: neutral
+        field: trace_id
         label: cache-churn
         forceNewSeries: false

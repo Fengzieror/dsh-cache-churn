@@ -51,6 +51,16 @@ const OUTSIDE = join(WORKSPACE, '..', 'definitely-not-the-workspace')
 /** Windows path comparison is case-insensitive and separator-agnostic. */
 const IS_WINDOWS = process.platform === 'win32'
 
+/**
+ * The default marker must look like an ordinary runtime field, not like an
+ * experiment. Anchored at both ends so a stray word ("marker", "churn") would
+ * fail the match rather than slip through.
+ */
+const NEUTRAL_RE = /^trace_id: [0-9a-f]{16}$/
+
+/** The self-describing format, kept behind `style: 'legacy'`. */
+const LEGACY_RE = /^Cache churn marker \(cache-churn\): \d+-\d+$/
+
 console.log('--- module shape ---')
 check('name', name, 'cache-churn')
 check('inject', inject, ['systemPrompt'])
@@ -65,19 +75,77 @@ console.log('\n--- default config registers one head section ---')
 	check('head order below harness identity', ctx.record.sections[0].order < ORDERS.HARNESS_IDENTITY, true)
 }
 
+console.log('\n--- default style is neutral ---')
+{
+	const ctx = mockCtx()
+	apply(ctx, { workspace: WORKSPACE, periodMs: 0 })
+	const text = ctx.record.sections[0].text
+	const line = text(ctxAt(WORKSPACE))
+	check('neutral shape', NEUTRAL_RE.test(line), true)
+	// The probe only works if nothing in the line gives the experiment away.
+	check('no "churn" in the line', /churn/i.test(line), false)
+	check('no "marker" in the line', /marker/i.test(line), false)
+	check('legacy shape not used', LEGACY_RE.test(line), false)
+	// A timestamp or counter would be decimal-only; `NEUTRAL_RE` already pins
+	// the length, so "contains a hex letter" is the deterministic way to say
+	// "this is not a decimal number wearing a hex costume". Asserting a *digit
+	// run* is absent would be flaky: 16 random hex chars contain 10
+	// consecutive digits roughly 6% of the time.
+	check('nonce is hex, not decimal', /^[0-9a-f]+$/.test(line.slice(-16)), true)
+}
+
+console.log('\n--- neutral nonce is random, not a counter ---')
+{
+	const ctx = mockCtx()
+	apply(ctx, { workspace: WORKSPACE, periodMs: 0 })
+	const text = ctx.record.sections[0].text
+	const seen = new Set()
+	for (let i = 0; i < 200; i++) seen.add(text(ctxAt(WORKSPACE)))
+	check('200 mints are all distinct', seen.size, 200)
+	const nonces = [...seen].map((l) => l.slice(-16))
+	// A decimal counter or a timestamp can never contain a letter. Across 200
+	// mints the odds that no nonce contains a-f are (10/16)^(16*200) ≈ 0.
+	check('some nonce contains a hex letter (not a counter)', nonces.some((n) => /[a-f]/.test(n)), true)
+	// A fixed prefix would collapse this to one value.
+	check('nonces have no fixed prefix', new Set(nonces.map((n) => n[0])).size > 1, true)
+}
+
+console.log('\n--- field name is configurable ---')
+{
+	const ctx = mockCtx()
+	apply(ctx, { workspace: WORKSPACE, periodMs: 0, field: 'session_ref' })
+	const line = ctx.record.sections[0].text(ctxAt(WORKSPACE))
+	check('custom field used', /^session_ref: [0-9a-f]{16}$/.test(line), true)
+}
+
+console.log('\n--- legacy style still renders the old format ---')
+{
+	const ctx = mockCtx()
+	apply(ctx, { workspace: WORKSPACE, periodMs: 0, style: 'legacy' })
+	const text = ctx.record.sections[0].text
+	check('legacy shape', LEGACY_RE.test(text(ctxAt(WORKSPACE))), true)
+	check('label honoured', text(ctxAt(WORKSPACE)).includes('(cache-churn)'), true)
+}
+{
+	const ctx = mockCtx()
+	apply(ctx, { workspace: WORKSPACE, periodMs: 0, style: 'legacy', label: 'badCacheWorkspace' })
+	const text = ctx.record.sections[0].text
+	check('custom label in legacy', /^Cache churn marker \(badCacheWorkspace\): \d+-\d+$/.test(text(ctxAt(WORKSPACE))), true)
+}
+
 console.log('\n--- workspace gate ---')
 {
 	const ctx = mockCtx()
 	apply(ctx, { workspace: WORKSPACE, periodMs: 0 })
 	const text = ctx.record.sections[0].text
-	check('matching cwd renders', text(ctxAt(WORKSPACE)).startsWith('Cache churn marker'), true)
+	check('matching cwd renders', NEUTRAL_RE.test(text(ctxAt(WORKSPACE))), true)
 	check('non-matching cwd is empty', text(ctxAt(OUTSIDE)), '')
 	check('missing cwd is empty', text({}), '')
 	check('missing agent is empty', text({ agent: undefined }), '')
 	// A trailing separator is normalized away by resolve() on every platform.
-	check('trailing separator tolerated', text(ctxAt(WORKSPACE + sep)).startsWith('Cache churn marker'), true)
+	check('trailing separator tolerated', NEUTRAL_RE.test(text(ctxAt(WORKSPACE + sep))), true)
 	// Case folding is a Windows-only behavior; POSIX paths are case-sensitive.
-	check('case handling matches the platform', text(ctxAt(WORKSPACE.toUpperCase())).startsWith('Cache churn marker'), IS_WINDOWS)
+	check('case handling matches the platform', NEUTRAL_RE.test(text(ctxAt(WORKSPACE.toUpperCase()))), IS_WINDOWS)
 }
 
 console.log('\n--- no workspace means every session ---')
@@ -85,7 +153,7 @@ console.log('\n--- no workspace means every session ---')
 	const ctx = mockCtx()
 	apply(ctx, { periodMs: 0 })
 	const text = ctx.record.sections[0].text
-	check('other cwd renders too', text(ctxAt(OUTSIDE)).startsWith('Cache churn marker'), true)
+	check('other cwd renders too', NEUTRAL_RE.test(text(ctxAt(OUTSIDE))), true)
 }
 
 console.log('\n--- rotation ---')
@@ -162,7 +230,10 @@ const rejects = [
 	['bad channel', { channel: 'bogus' }],
 	['bad position', { position: 'middle' }],
 	['non-string workspace', { workspace: 42 }],
-	['empty label', { label: '' }]
+	['empty label', { label: '' }],
+	['bad style', { style: 'stealth' }],
+	['non-string field', { field: 7 }],
+	['blank field', { field: '   ' }]
 ]
 for (const [label, config] of rejects) {
 	let threw = false

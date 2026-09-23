@@ -59,6 +59,15 @@ const check = (label, actual, expected) => {
  */
 const WORKSPACE = process.cwd()
 
+/** The default marker shape: a plausible runtime field with an opaque nonce. */
+const NEUTRAL_RE = /^trace_id: [0-9a-f]{16}$/
+
+/** The self-describing shape, selected with `style: 'legacy'`. */
+const LEGACY_RE = /^Cache churn marker \(cache-churn\): \d+-\d+$/
+
+/** The legacy first-line prefix, used to locate the marker in a rendered prompt. */
+const LEGACY_PREFIX = 'Cache churn marker'
+
 /**
  * Build a real Context with a real SystemPrompt service mounted, apply the
  * plugin to it, and return both.
@@ -86,29 +95,60 @@ console.log('--- real SystemPrompt: head section breaks the prefix ---')
 	const first = await render(promptCtx, WORKSPACE)
 	const second = await render(promptCtx, WORKSPACE)
 
-	check('marker present', first.includes('Cache churn marker'), true)
+	check('marker present', NEUTRAL_RE.test(first.split('\n')[0]), true)
 	check('prompt changes between assemblies', first !== second, true)
-	check('marker is at the very start', first.startsWith('Cache churn marker'), true)
+	check('marker is at the very start', NEUTRAL_RE.test(first.split('\n')[0]), true)
 
 	// The whole point: the FIRST tokens differ, so no prefix survives.
 	const firstLine = first.split('\n')[0]
 	const secondLine = second.split('\n')[0]
 	check('first line differs (no reusable prefix)', firstLine !== secondLine, true)
 
+	// The probe depends on the prompt not announcing itself. Counting against a
+	// disabled render is the cwd-independent form: this test's own cwd happens
+	// to be named `cache-churn`, so a bare substring search over the whole
+	// prompt would match the interpolated `{{cwd}}` rather than the marker.
+	const count = (text, re) => (text.match(re) ?? []).length
+	const disabled = await withSystemPrompt({ enabled: false, workspace: WORKSPACE })
+	const baseline = await render(disabled.promptCtx, WORKSPACE)
+	await disabled.pluginFiber.dispose()
+
+	check('marker adds no "churn" to the prompt', count(first, /churn/gi), count(baseline, /churn/gi))
+	check('marker adds no "marker" to the prompt', count(first, /marker/gi), count(baseline, /marker/gi))
+	check('nothing in the marker line says "churn"', /churn/i.test(firstLine), false)
+	check('nothing in the marker line says "marker"', /marker/i.test(firstLine), false)
+
+	await pluginFiber.dispose()
+}
+
+console.log('\n--- neutral nonce is unpredictable across assemblies ---')
+{
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0 })
+	const lines = new Set()
+	for (let i = 0; i < 50; i++) lines.add((await render(promptCtx, WORKSPACE)).split('\n')[0])
+	check('50 assemblies give 50 distinct nonces', lines.size, 50)
+	await pluginFiber.dispose()
+}
+
+console.log('\n--- legacy style restores the self-describing line ---')
+{
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, style: 'legacy' })
+	const first = await render(promptCtx, WORKSPACE)
+	check('legacy marker present', LEGACY_RE.test(first.split('\n')[0]), true)
 	await pluginFiber.dispose()
 }
 
 console.log('\n--- tail position preserves a reusable prefix ---')
 {
-	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, position: 'tail' })
+	const { promptCtx, pluginFiber } = await withSystemPrompt({ workspace: WORKSPACE, periodMs: 0, position: 'tail', style: 'legacy' })
 	const first = await render(promptCtx, WORKSPACE)
 	const second = await render(promptCtx, WORKSPACE)
 
 	check('prompt still changes', first !== second, true)
-	check('marker NOT at start', first.startsWith('Cache churn marker'), false)
+	check('marker NOT at start', first.startsWith(LEGACY_PREFIX), false)
 
 	// Everything before the marker line is byte-identical: the shared prefix.
-	const before = (text) => text.slice(0, text.indexOf('Cache churn marker'))
+	const before = (text) => text.slice(0, text.indexOf(LEGACY_PREFIX))
 	check('prefix before marker is identical', before(first) === before(second), true)
 	check('shared prefix is substantial', before(first).length > 20, true)
 
@@ -124,8 +164,8 @@ console.log('\n--- workspace gate on the real service ---')
 	const inside = await render(promptCtx, WORKSPACE)
 	const outside = await render(promptCtx, outsideCwd)
 
-	check('inside has marker', inside.includes('Cache churn marker'), true)
-	check('outside has no marker', outside.includes('Cache churn marker'), false)
+	check('inside has marker', NEUTRAL_RE.test(inside.split('\n')[0]), true)
+	check('outside has no marker', NEUTRAL_RE.test(outside.split('\n')[0]), false)
 
 	// Two outside renders must be byte-identical: the plugin is inert there.
 	const outsideAgain = await render(promptCtx, outsideCwd)
@@ -151,8 +191,8 @@ console.log('\n--- context channel is append-only, not prefix-breaking ---')
 	const prompt = renderPrompt(assembly)
 	const contexts = assembly.contexts.map((c) => c.text).join('\n')
 
-	check('system prompt has NO marker', prompt.includes('Cache churn marker'), false)
-	check('runtime context HAS marker', contexts.includes('Cache churn marker'), true)
+	check('system prompt has NO marker', NEUTRAL_RE.test(prompt.split('\n')[0]), false)
+	check('runtime context HAS marker', NEUTRAL_RE.test(contexts.trim()), true)
 	await pluginFiber.dispose()
 }
 

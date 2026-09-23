@@ -11,6 +11,8 @@ A DeepSeek Harness bundle that makes one workspace's prompt cache miss on a sche
 
 It registers one system-prompt contribution whose text is a function. The system-prompt registry evaluates a function `text` on **every** assembly, so a value that rotates on a timer reaches every model request. Because the rendered prompt is committed as a `system/message` surface node, a changed prompt is a changed request from its first token.
 
+By default the line it renders is deliberately **unremarkable** — see [Marker styles](#marker-styles).
+
 ## Why this defeats the cache
 
 The provider's prompt cache reuses an unchanged request prefix. How a prompt change interacts with that prefix depends on the route:
@@ -54,6 +56,8 @@ The bundle's `cordis.patch.yml` inserts one row, **disabled**. Installing this p
     position: head
     workspace: 'D:/Projects/_agent-ops/badCacheRate'
     periodMs: 10000
+    style: neutral
+    field: trace_id
     label: badCacheRate
     forceNewSeries: false
 ```
@@ -65,8 +69,41 @@ The bundle's `cordis.patch.yml` inserts one row, **disabled**. Installing this p
 | `position` | `'head'` | `'head'` puts the marker before every other prompt section; `'tail'` puts it last |
 | `workspace` | `''` | Session cwd the marker is confined to; empty means every session |
 | `periodMs` | `10000` | Rotation period. `0` mints a new value on every assembly |
-| `label` | `'cache-churn'` | Marker label, so two instances are distinguishable |
+| `style` | `'neutral'` | `'neutral'` renders an opaque field; `'legacy'` renders the self-describing marker line |
+| `field` | `'trace_id'` | Field name used by the `neutral` style |
+| `label` | `'cache-churn'` | Marker label used by the `legacy` style, so two instances are distinguishable |
 | `forceNewSeries` | `false` | Start a new request series every step, forcing the aggressive path on `in-history` routes |
+
+### Marker styles
+
+`style` decides what the rotating line looks like, and it is the difference between an instrument that measures the cache and one that can also probe a vendor.
+
+`neutral` (default) renders a plausible runtime field carrying an opaque nonce:
+
+```markdown
+trace_id: 9f2c41ab77d0e153
+```
+
+The nonce is 8 random bytes as hex. It contains no timestamp, no counter, and no structure: the value cannot be decoded back into "this rotates every 10s", and it cannot be predicted from the previous one. Uniqueness is statistical rather than guaranteed, which is the right trade — a collision in a 64-bit space is far less likely than the harness failing for an unrelated reason, and the alternative (a counter) leaks exactly the rotation pattern the style exists to hide. Change `field` if `trace_id` does not fit the deployment you are imitating.
+
+`legacy` renders the original self-describing line:
+
+```markdown
+Cache churn marker (badCacheRate): 1758364800000-1
+```
+
+The value is `<epoch-ms>-<mint index>`. The index makes a token unique even when two assemblies land in the same millisecond, so `periodMs: 0` really does change the prompt on every request rather than occasionally rendering a duplicate.
+
+### Why `neutral` is the default
+
+The rotation has two possible audiences. One is the harness's own accounting, where a self-describing line is convenient. The other is whoever handles the request on the provider side, and there the self-describing line is a liability: it announces that the cache miss is deliberate, which lets a reader describe the miss accurately while revealing nothing about whether they read the request at all.
+
+With `neutral`, the two cases separate cleanly:
+
+- A party limited to aggregate statistics can only report the observable — that the prefix misses.
+- A party that can read request content can quote the nonce back verbatim, and that quote is not explainable by aggregate data.
+
+Use `legacy` when you want the prompt to agree with the log, and for the test suite's shape assertions. Use `neutral` when the line is meant to be read by someone else.
 
 ### Position
 
@@ -95,13 +132,17 @@ Leave `workspace` empty to churn every session in the process.
 
 #### What the model sees
 
-On a matching session, one line appended after the deployment persona suffix:
+On a matching session, one line at the configured position. With the default `style: neutral`, `position: head` and `field: trace_id`:
+
+```markdown
+trace_id: 9f2c41ab77d0e153
+```
+
+With `style: legacy`:
 
 ```markdown
 Cache churn marker (badCacheRate): 1758364800000-1
 ```
-
-The value is `<epoch-ms>-<mint index>`. The index makes a token unique even when two assemblies land in the same millisecond, so `periodMs: 0` really does change the prompt on every request rather than occasionally rendering a duplicate.
 
 #### Token effect
 
@@ -114,6 +155,7 @@ Replacing. On a route without `systemPromptUpdate: 'in-history'`, every rotation
 ## Known Limitations and Deferred Work
 
 - **This package exists to waste money and latency** — every rotation discards a provider cache that would otherwise have been reused. Confine `workspace` before enabling it, and disable the row when the experiment ends.
+- **`neutral` is camouflage, not concealment** — the line still reaches the model and still appears in your own logs and in the rendered prompt. It hides *intent*, not *presence*: a reader who correlates the prompt across two requests still sees the field change. What it removes is the free hint that the change is deliberate.
 - **Rotation is assembly-driven, not wall-clock-driven** — the token advances only when an assembly asks for it, so an idle session mints nothing and a session resuming after a long pause mints exactly one new value rather than catching up.
 - **`forceNewSeries` is coarser than it needs to be** — it starts a new series on every step of a matching session rather than only on rotation, because a pre-step listener cannot observe which assembly value a later prompt commit will render.
 - **No `systemPromptUpdate` introspection** — the plugin cannot read the prepared route's mode, so `forceNewSeries` is an operator decision rather than a derived one.
